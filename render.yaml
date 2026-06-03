@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: spocket-rocket-ditto
+    runtime: node
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+
+  - type: web
+    name: spocket-rocket-ditto-typography-extract
+    runtime: docker
+    rootDir: typography-extract-api/typography-extract
+    dockerfilePath: ./Dockerfile
