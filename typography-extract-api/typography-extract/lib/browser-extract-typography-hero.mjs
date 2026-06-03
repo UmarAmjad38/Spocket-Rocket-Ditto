@@ -239,6 +239,20 @@ export default function browserExtractTypographyAndHero() {
     let t = String(el.textContent || "")
       .trim()
       .replace(/\s+/g, " ");
+    if (!t) {
+      try {
+        const lines = el.querySelectorAll(".line, .split-line, [class*='split'] .line");
+        if (lines.length) {
+          t = Array.from(lines)
+            .map((line) => String(line.textContent || "").trim())
+            .filter(Boolean)
+            .join(" ")
+            .replace(/\s+/g, " ");
+        }
+      } catch {
+        /* ignore */
+      }
+    }
     if (t) {
       return t;
     }
@@ -279,8 +293,19 @@ export default function browserExtractTypographyAndHero() {
     if (!el) {
       return false;
     }
+    const tag = String(el.tagName || "").toLowerCase();
+    if (tag === "h1") {
+      return true;
+    }
     const cls = String(el.className || "").toLowerCase();
-    if (/tile-headline|headline|hero-title|page-title|display-/.test(cls)) {
+    if (/tile-headline|headline|hero-title|page-title|display-|\bheading\b/.test(cls)) {
+      return true;
+    }
+    if (
+      el.closest?.(
+        ".sr-one-col-01, .sr-multicol-media, [class*='sr-one-col'], .sr-cover-inner, .dnd-module, .dnd-section",
+      )
+    ) {
       return true;
     }
     if (
@@ -293,17 +318,35 @@ export default function browserExtractTypographyAndHero() {
     return !isDisplayHeadingFontSize(gs(el, "fontSize"));
   }
 
+  function isAppleStyleTileHero(heroRoot, strategy) {
+    if (/multi-tile|tile-wrapper|section-hero/i.test(String(strategy || ""))) {
+      return true;
+    }
+    try {
+      return !!heroRoot?.querySelector?.(".tile-image-wrapper, section.section-hero > .tile-wrapper");
+    } catch {
+      return false;
+    }
+  }
+
+  function isTiledThumbnailHeroUrl(url) {
+    return /_small(?:\.|__|$)/i.test(String(url || ""));
+  }
+
   function isLikelyHeroVideoPosterUrl(url) {
     return /startframe|posterframe|_poster\.|video.*frame/i.test(String(url || ""));
   }
 
-  /** Prefer full-bleed hero assets over Apple-style composite thumbnails. */
-  function heroImageUrlRank(url) {
+  /** Prefer full-bleed hero assets over Apple-style composite thumbnails (tile heroes only). */
+  function heroImageUrlRank(url, appleTileMode) {
     const u = String(url || "").toLowerCase();
     if (!u || /\.svg(?:\?|$)/i.test(u)) {
-      return 0;
+      return appleTileMode ? 0 : 1;
     }
-    if (/_small(?:\.|__|$)/i.test(u) || /\/small[._-]/i.test(u)) {
+    if (!appleTileMode) {
+      return 1;
+    }
+    if (/_small(?:\.|__|$)/i.test(u)) {
       return 0.08;
     }
     if (/_mediumtall(?:\.|__|$)/i.test(u)) {
@@ -343,17 +386,58 @@ export default function browserExtractTypographyAndHero() {
     return bestUrl;
   }
 
-  function effectiveHeroMediaScore(entry) {
+  function effectiveHeroMediaScore(entry, appleTileMode) {
     const url = entry?.url || "";
-    const rank = heroImageUrlRank(url);
+    const rank = heroImageUrlRank(url, appleTileMode);
     if (rank <= 0) {
       return 0;
     }
     let score = (Number(entry?.score) || 0) * rank;
-    if (isLikelyHeroVideoPosterUrl(url)) {
+    if (appleTileMode && isLikelyHeroVideoPosterUrl(url)) {
       score *= 0.82;
     }
     return score;
+  }
+
+  function pickRecommendedHeroMedia(media, appleTileMode) {
+    if (!appleTileMode) {
+      const bestCss = media.find((m) => m.kind === "css-background" && !/logo/i.test(m.url || ""));
+      const bestImg = media.find(
+        (m) =>
+          m.kind === "img" &&
+          !/logo/i.test(m.url || "") &&
+          !isLikelyHeroVideoPosterUrl(m.url || ""),
+      );
+      let recommended =
+        bestCss ||
+        bestImg ||
+        media.find((m) => !/logo/i.test(m.url || "") && !isLikelyHeroVideoPosterUrl(m.url || "")) ||
+        null;
+      if (bestImg && bestCss && (bestCss.score || 0) > (bestImg.score || 0) * 1.2) {
+        recommended = bestCss;
+      }
+      return recommended;
+    }
+
+    const ranked = media
+      .filter((m) => !/logo/i.test(m.url || "") && heroImageUrlRank(m.url, true) > 0)
+      .map((m) => ({ entry: m, effective: effectiveHeroMediaScore(m, true) }))
+      .filter((r) => r.effective > 0)
+      .sort((a, b) => b.effective - a.effective);
+
+    let recommended = ranked[0]?.entry || null;
+    const bestCss = ranked.find((r) => r.entry.kind === "css-background")?.entry;
+    const bestImg = ranked.find((r) => r.entry.kind === "img")?.entry;
+    if (bestImg && bestCss) {
+      const cssEff = effectiveHeroMediaScore(bestCss, true);
+      const imgEff = effectiveHeroMediaScore(bestImg, true);
+      if (cssEff > imgEff * 1.2) {
+        recommended = bestCss;
+      } else if (imgEff >= cssEff) {
+        recommended = bestImg;
+      }
+    }
+    return recommended;
   }
 
   function isLikelyLogoImage(img) {
@@ -935,7 +1019,8 @@ export default function browserExtractTypographyAndHero() {
    * Collects `<img>`, `<picture>`, video posters, and non-gradient `background-image` layers
    * under the hero root for ranking + fallbacks (not only the first URL in the parent chain).
    */
-  function extractHeroMediaInventory(heroRoot) {
+  function extractHeroMediaInventory(heroRoot, opts = {}) {
+    const appleTileMode = Boolean(opts.appleTileMode);
     const byUrl = new Map();
     const vh = Math.min(window.innerHeight, 1080);
 
@@ -959,6 +1044,41 @@ export default function browserExtractTypographyAndHero() {
         byUrl.set(abs, { kind, url: abs, ...extra, score });
       }
     };
+
+    try {
+      heroRoot.querySelectorAll(".sr-cover-image, [class*='cover-image']").forEach((el, i) => {
+        if (i > 8) {
+          return;
+        }
+        const r = el.getBoundingClientRect();
+        if (r.width < 2 || r.height < 2) {
+          return;
+        }
+        const area = Math.min(r.width * r.height, 4e6);
+        let bgi = gs(el, "backgroundImage");
+        if (!bgi || bgi === "none") {
+          const inline = String(el.getAttribute("style") || "");
+          const m = inline.match(/background-image:\s*url\((['"]?)([^'")]+)\1\)/i);
+          if (m && m[2]) {
+            bgi = `url("${m[2]}")`;
+          }
+        }
+        if (!bgi || bgi === "none") {
+          return;
+        }
+        parseBgUrls(bgi)
+          .filter((u) => !/gradient/i.test(String(u)))
+          .forEach((u) => {
+            add("css-background", u, {
+              score: area * 2.8 * 0.001,
+              sourceTag: "sr-cover-image",
+              sourceClass: String(el.className || "").slice(0, 100),
+            });
+          });
+      });
+    } catch {
+      /* ignore */
+    }
 
     const imgVisibleScore = (img) => {
       const r = img.getBoundingClientRect();
@@ -1013,13 +1133,15 @@ export default function browserExtractTypographyAndHero() {
           return;
         }
         const ss = src.getAttribute("srcset") || "";
-        const largest = parseSrcsetLargestUrl(ss);
-        if (largest) {
+        const pickUrl = appleTileMode ? parseSrcsetLargestUrl(ss) : ss.split(",")[0].trim().split(/\s+/)[0];
+        if (pickUrl) {
           const inTileImage = !!src.closest(".tile-image-wrapper");
-          const rank = heroImageUrlRank(largest);
+          const rank = heroImageUrlRank(pickUrl, appleTileMode);
           if (rank > 0) {
-            add("picture-srcset", largest, {
-              score: 500 * (inTileImage ? 1.5 : 1) * rank,
+            const posterPenalty =
+              appleTileMode && isLikelyHeroVideoPosterUrl(pickUrl) ? 0.35 : 1;
+            add("picture-srcset", pickUrl, {
+              score: 500 * (inTileImage ? 1.5 : 1) * rank * posterPenalty,
             });
           }
         }
@@ -1099,24 +1221,7 @@ export default function browserExtractTypographyAndHero() {
 
     const media = Array.from(byUrl.values()).sort((a, b) => (b.score || 0) - (a.score || 0));
 
-    const ranked = media
-      .filter((m) => !/logo/i.test(m.url || "") && heroImageUrlRank(m.url) > 0)
-      .map((m) => ({ entry: m, effective: effectiveHeroMediaScore(m) }))
-      .filter((r) => r.effective > 0)
-      .sort((a, b) => b.effective - a.effective);
-
-    let recommended = ranked[0]?.entry || null;
-    const bestCss = ranked.find((r) => r.entry.kind === "css-background")?.entry;
-    const bestImg = ranked.find((r) => r.entry.kind === "img")?.entry;
-    if (bestImg && bestCss) {
-      const cssEff = effectiveHeroMediaScore(bestCss);
-      const imgEff = effectiveHeroMediaScore(bestImg);
-      if (cssEff > imgEff * 1.2) {
-        recommended = bestCss;
-      } else if (imgEff >= cssEff) {
-        recommended = bestImg;
-      }
-    }
+    const recommended = pickRecommendedHeroMedia(media, appleTileMode);
 
     const imageUrlsOrdered = [];
     const pushU = (u) => {
@@ -1770,6 +1875,26 @@ export default function browserExtractTypographyAndHero() {
     hero.text.titleTag = String(h2Only.tagName || "").toLowerCase() || "h2";
     titleEl = h2Only;
   }
+  if (!hero.text.title && /hubspot-sr|dnd-section|h1-sr-module/i.test(String(picked.strategy || ""))) {
+    const inner = textScope.querySelector(".sr-cover-inner") || textScope;
+    const srHeadings = inner.querySelectorAll(
+      "h1, h2, h3, .heading, [class*='display-1'], [class*='display-2']",
+    );
+    for (const el of srHeadings) {
+      const t = extractHeadingTextFromEl(el);
+      if (!t || t.length < 3) {
+        continue;
+      }
+      const sub = String(hero.text.subtitle || "").trim();
+      if (sub && t === sub) {
+        continue;
+      }
+      hero.text.title = t;
+      hero.text.titleTag = String(el.tagName || "h1").toLowerCase() || "h1";
+      titleEl = el;
+      break;
+    }
+  }
   if (!hero.text.title && picked.strategy === "fusion-banner") {
     const pageTitle = String(document.title || "").split("|")[0].trim();
     if (pageTitle) {
@@ -1952,7 +2077,8 @@ export default function browserExtractTypographyAndHero() {
       }
     });
   }
-  const inventory = extractHeroMediaInventory(heroEl);
+  const appleTileMode = isAppleStyleTileHero(heroEl, picked.strategy);
+  const inventory = extractHeroMediaInventory(heroEl, { appleTileMode });
   hero.media = inventory.media || [];
   hero.extractionMeta.imageCandidateCount = hero.media.length;
 
@@ -1975,7 +2101,11 @@ export default function browserExtractTypographyAndHero() {
   hero.background.recommendedImageUrl =
     inventory.recommendedImageUrl || mergedUrls[0] || "";
   hero.background.gradient = backdrop.gradient;
-  if (hero.background.recommendedImageUrl) {
+  const forceCover =
+    appleTileMode ||
+    (isTiledThumbnailHeroUrl(hero.background.recommendedImageUrl) &&
+      (/repeat/i.test(backdrop.backgroundRepeat || "") || backdrop.backgroundSize === "auto"));
+  if (hero.background.recommendedImageUrl && forceCover) {
     hero.background.backgroundSize = "cover";
     hero.background.backgroundPosition = backdrop.backgroundPosition || "center";
     hero.background.backgroundRepeat = "no-repeat";

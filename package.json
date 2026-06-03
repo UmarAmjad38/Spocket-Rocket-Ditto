@@ -5,8 +5,8 @@
   "main": "server.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node server.js",
-    "dev": "nodemon server.js",
+    "start": "node api.js && node server.js",
+    "dev": "node api.js && nodemon server.js",
     "dev:stable": "node server.js",
     "upload-sr-theme": "node scripts/hubspot-upload-sr2026-new-folder.cjs",
     "upload-my-theme": "npx --yes -p @hubspot/cli@8.4.0 hs cms upload my-theme /my-theme",
