@@ -67,12 +67,136 @@ export default function browserExtractTypographyAndHero() {
     return (
       root.querySelector("#introtexttop, [id*='introtext']") ||
       root.querySelector(".sr-cover-inner") ||
+      root.querySelector(".content-wrapper") ||
       root.querySelector(".hs-bannner-text, [class*='bannner-text'], [class*='banner-text']") ||
       root.querySelector(".hero__content, .hero-content, [class*='hero__text']") ||
       root.querySelector(".wpb_wrapper") ||
       root.querySelector(".fusion-builder-row") ||
       root
     );
+  }
+
+  function isInsideSiteNav(el) {
+    if (!el || !el.closest) {
+      return false;
+    }
+    return !!el.closest(
+      "header, nav, [role='navigation'], #header-outer, #top-bar, .site-header, .header-wrapper, .header-inner",
+    );
+  }
+
+  /**
+   * HubSpot DND + Sprocket Rocket modules (e.g. sr-one-col-01) — hero is often a div, not section/header.
+   */
+  function findHubSpotSrHeroRoot() {
+    const moduleSelectors = [
+      ".sr-one-col-01",
+      ".sr-multicol-media.sr-one-col-01",
+      "[class*='sr-one-col-']",
+      ".sr-multicol-media",
+    ];
+    try {
+      for (const sel of moduleSelectors) {
+        for (const el of document.querySelectorAll(sel)) {
+          if (!el.querySelector("h1") || isInsideSiteNav(el)) {
+            continue;
+          }
+          const a = areaVisible(el);
+          if (a <= 0) {
+            continue;
+          }
+          return {
+            el,
+            strategy: "hubspot-sr-module",
+            score: a * 1.85,
+            found: true,
+          };
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+    try {
+      for (const el of document.querySelectorAll(".dnd-section, [class*='dnd-section']")) {
+        if (!el.querySelector("h1") || isInsideSiteNav(el)) {
+          continue;
+        }
+        const inner =
+          el.querySelector(".sr-multicol-media, .widget-type-custom_widget, .dnd-module") || el;
+        const a = areaVisible(inner);
+        if (a <= 0) {
+          continue;
+        }
+        return {
+          el: inner,
+          strategy: "hubspot-dnd-section-with-h1",
+          score: a * 1.72,
+          found: true,
+        };
+      }
+    } catch {
+      /* ignore */
+    }
+    return null;
+  }
+
+  /** First visible page h1 outside global nav/header — fallback when header wins without a title. */
+  function findHeroRootFromVisibleH1() {
+    let h1s;
+    try {
+      h1s = document.querySelectorAll("h1");
+    } catch {
+      return null;
+    }
+    for (const h1 of h1s) {
+      if (isInsideSiteNav(h1)) {
+        continue;
+      }
+      const text = String(h1.textContent || "").replace(/\s+/g, " ").trim();
+      if (!text) {
+        continue;
+      }
+      const srMod = h1.closest?.(
+        ".sr-multicol-media, .sr-one-col-01, [class*='sr-one-col'], .widget-type-custom_widget, .dnd-module",
+      );
+      if (srMod && !isInsideSiteNav(srMod) && areaVisible(srMod) > 150) {
+        return {
+          el: srMod,
+          strategy: "h1-sr-module-ancestor",
+          score: areaVisible(srMod),
+          found: true,
+        };
+      }
+      let a = h1;
+      for (let i = 0; i < 12 && a; i++) {
+        if (
+          a !== document.body &&
+          areaVisible(a) > 200 &&
+          (a.matches?.("section") ||
+            /hero|banner|jumbotron|cover|masthead|sr-one-col|sr-multicol|dnd-section|dnd-module|one-col/i.test(
+              `${a.className || ""} ${a.id || ""}`,
+            ))
+        ) {
+          return {
+            el: a,
+            strategy: "h1-hero-ancestor",
+            score: areaVisible(a),
+            found: true,
+          };
+        }
+        a = a.parentElement;
+      }
+      const p = h1.parentElement;
+      if (p && p !== document.body && areaVisible(p) > 150) {
+        return {
+          el: p,
+          strategy: "h1-parent",
+          score: areaVisible(p),
+          found: true,
+        };
+      }
+    }
+    return null;
   }
 
   function isLikelyLogoImage(img) {
@@ -811,6 +935,11 @@ export default function browserExtractTypographyAndHero() {
       return fusionBanner;
     }
 
+    const hubspotSr = findHubSpotSrHeroRoot();
+    if (hubspotSr) {
+      return hubspotSr;
+    }
+
     const scored = [];
     const add = (el, strategy, weight) => {
       if (!el || el.nodeType !== 1) {
@@ -908,6 +1037,22 @@ export default function browserExtractTypographyAndHero() {
     } catch {
       /* ignore */
     }
+    try {
+      document
+        .querySelectorAll(
+          ".sr-one-col-01, [class*='sr-one-col-'], .sr-multicol-media, .dnd-section, [class*='dnd-section']",
+        )
+        .forEach((el) => {
+          const hasH1 = !!el.querySelector("h1");
+          add(
+            el,
+            hasH1 ? "hubspot-sr-module-with-h1" : "hubspot-sr-module",
+            hasH1 ? 1.78 : 1.35,
+          );
+        });
+    } catch {
+      /* ignore */
+    }
 
     scored.sort((x, y) => y.score - x.score);
     const best = scored[0];
@@ -926,47 +1071,24 @@ export default function browserExtractTypographyAndHero() {
         if (alt) {
           return { ...alt, found: true };
         }
+        const h1Root = findHeroRootFromVisibleH1();
+        if (h1Root) {
+          return h1Root;
+        }
       }
       return { ...best, found: true };
     }
     if (
       scored.length &&
       scored[0].score > 11000 &&
-      /with-h1|h1-hero|role-banner|banner-class|keyword/i.test(scored[0].strategy || "")
+      /with-h1|h1-hero|role-banner|banner-class|keyword|hubspot-sr/i.test(scored[0].strategy || "")
     ) {
       return { ...scored[0], found: true };
     }
 
-    const h1 = document.querySelector("h1");
-    if (h1) {
-      let a = h1;
-      for (let i = 0; i < 10 && a; i++) {
-        if (
-          a !== document.body &&
-          areaVisible(a) > 200 &&
-          (a.matches?.("section") ||
-            /hero|banner|jumbotron|cover|masthead/i.test(
-              (a.className || "") + (a.id || ""),
-            ))
-        ) {
-          return {
-            el: a,
-            strategy: "h1-hero-ancestor",
-            score: areaVisible(a),
-            found: true,
-          };
-        }
-        a = a.parentElement;
-      }
-      const p = h1.parentElement;
-      if (p && p !== document.body && areaVisible(p) > 150) {
-        return {
-          el: p,
-          strategy: "h1-parent",
-          score: areaVisible(p),
-          found: true,
-        };
-      }
+    const h1Root = findHeroRootFromVisibleH1();
+    if (h1Root) {
+      return h1Root;
     }
 
     return { el: null, strategy: "none", score: 0, found: false };
