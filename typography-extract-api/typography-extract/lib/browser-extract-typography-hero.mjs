@@ -297,6 +297,65 @@ export default function browserExtractTypographyAndHero() {
     return /startframe|posterframe|_poster\.|video.*frame/i.test(String(url || ""));
   }
 
+  /** Prefer full-bleed hero assets over Apple-style composite thumbnails. */
+  function heroImageUrlRank(url) {
+    const u = String(url || "").toLowerCase();
+    if (!u || /\.svg(?:\?|$)/i.test(u)) {
+      return 0;
+    }
+    if (/_small(?:\.|__|$)/i.test(u) || /\/small[._-]/i.test(u)) {
+      return 0.08;
+    }
+    if (/_mediumtall(?:\.|__|$)/i.test(u)) {
+      return 0.72;
+    }
+    if (/_medium(?:\.|__|$)/i.test(u)) {
+      return 0.55;
+    }
+    if (/_large(?:\.|__|$)/i.test(u) && !/_largetall/i.test(u)) {
+      return 0.9;
+    }
+    if (/_largetall(?:\.|__|$)/i.test(u)) {
+      return 1;
+    }
+    return 0.75;
+  }
+
+  function parseSrcsetLargestUrl(srcset) {
+    let bestUrl = "";
+    let bestW = 0;
+    for (const part of String(srcset || "").split(",")) {
+      const bits = part.trim().split(/\s+/);
+      if (!bits[0]) {
+        continue;
+      }
+      let w = 0;
+      if (bits[1]?.endsWith("w")) {
+        w = parseInt(bits[1], 10) || 0;
+      } else if (bits[1]?.endsWith("x")) {
+        w = Math.round(parseFloat(bits[1]) * 1000) || 0;
+      }
+      if (!bestUrl || w >= bestW) {
+        bestUrl = bits[0];
+        bestW = w;
+      }
+    }
+    return bestUrl;
+  }
+
+  function effectiveHeroMediaScore(entry) {
+    const url = entry?.url || "";
+    const rank = heroImageUrlRank(url);
+    if (rank <= 0) {
+      return 0;
+    }
+    let score = (Number(entry?.score) || 0) * rank;
+    if (isLikelyHeroVideoPosterUrl(url)) {
+      score *= 0.82;
+    }
+    return score;
+  }
+
   function isLikelyLogoImage(img) {
     if (!img) {
       return false;
@@ -954,13 +1013,15 @@ export default function browserExtractTypographyAndHero() {
           return;
         }
         const ss = src.getAttribute("srcset") || "";
-        const first = ss.split(",")[0].trim().split(/\s+/)[0];
-        if (first) {
+        const largest = parseSrcsetLargestUrl(ss);
+        if (largest) {
           const inTileImage = !!src.closest(".tile-image-wrapper");
-          const posterPenalty = isLikelyHeroVideoPosterUrl(first) ? 0.35 : 1;
-          add("picture-srcset", first, {
-            score: 500 * (inTileImage ? 1.5 : 1) * posterPenalty,
-          });
+          const rank = heroImageUrlRank(largest);
+          if (rank > 0) {
+            add("picture-srcset", largest, {
+              score: 500 * (inTileImage ? 1.5 : 1) * rank,
+            });
+          }
         }
       });
     } catch {
@@ -1038,20 +1099,23 @@ export default function browserExtractTypographyAndHero() {
 
     const media = Array.from(byUrl.values()).sort((a, b) => (b.score || 0) - (a.score || 0));
 
-    const bestCss = media.find((m) => m.kind === "css-background" && !/logo/i.test(m.url || ""));
-    const bestImg = media.find(
-      (m) =>
-        m.kind === "img" &&
-        !/logo/i.test(m.url || "") &&
-        !isLikelyHeroVideoPosterUrl(m.url || ""),
-    );
-    let recommended =
-      bestCss ||
-      bestImg ||
-      media.find((m) => !/logo/i.test(m.url || "") && !isLikelyHeroVideoPosterUrl(m.url || "")) ||
-      null;
-    if (bestImg && bestCss && (bestCss.score || 0) > (bestImg.score || 0) * 1.2) {
-      recommended = bestCss;
+    const ranked = media
+      .filter((m) => !/logo/i.test(m.url || "") && heroImageUrlRank(m.url) > 0)
+      .map((m) => ({ entry: m, effective: effectiveHeroMediaScore(m) }))
+      .filter((r) => r.effective > 0)
+      .sort((a, b) => b.effective - a.effective);
+
+    let recommended = ranked[0]?.entry || null;
+    const bestCss = ranked.find((r) => r.entry.kind === "css-background")?.entry;
+    const bestImg = ranked.find((r) => r.entry.kind === "img")?.entry;
+    if (bestImg && bestCss) {
+      const cssEff = effectiveHeroMediaScore(bestCss);
+      const imgEff = effectiveHeroMediaScore(bestImg);
+      if (cssEff > imgEff * 1.2) {
+        recommended = bestCss;
+      } else if (imgEff >= cssEff) {
+        recommended = bestImg;
+      }
     }
 
     const imageUrlsOrdered = [];
@@ -1911,9 +1975,15 @@ export default function browserExtractTypographyAndHero() {
   hero.background.recommendedImageUrl =
     inventory.recommendedImageUrl || mergedUrls[0] || "";
   hero.background.gradient = backdrop.gradient;
-  hero.background.backgroundSize = backdrop.backgroundSize || "";
-  hero.background.backgroundPosition = backdrop.backgroundPosition || "";
-  hero.background.backgroundRepeat = backdrop.backgroundRepeat || "";
+  if (hero.background.recommendedImageUrl) {
+    hero.background.backgroundSize = "cover";
+    hero.background.backgroundPosition = backdrop.backgroundPosition || "center";
+    hero.background.backgroundRepeat = "no-repeat";
+  } else {
+    hero.background.backgroundSize = backdrop.backgroundSize || "";
+    hero.background.backgroundPosition = backdrop.backgroundPosition || "";
+    hero.background.backgroundRepeat = backdrop.backgroundRepeat || "";
+  }
   try {
     const heroVideo = heroEl.querySelector(
       "video source[src], video[src], .nectar-video-bg source[src]",
