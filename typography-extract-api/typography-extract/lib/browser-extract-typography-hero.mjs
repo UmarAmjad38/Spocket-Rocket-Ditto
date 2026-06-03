@@ -67,6 +67,7 @@ export default function browserExtractTypographyAndHero() {
     return (
       root.querySelector("#introtexttop, [id*='introtext']") ||
       root.querySelector(".sr-cover-inner") ||
+      root.querySelector(".tile-copy-wrapper, .tile-content") ||
       root.querySelector(".content-wrapper") ||
       root.querySelector(".hs-bannner-text, [class*='bannner-text'], [class*='banner-text']") ||
       root.querySelector(".hero__content, .hero-content, [class*='hero__text']") ||
@@ -199,8 +200,108 @@ export default function browserExtractTypographyAndHero() {
     return null;
   }
 
+  /**
+   * Apple.com and similar: one `<section class="section-hero">` stacks many `.tile-wrapper` promos.
+   * Use only the first visible tile — not the whole section (avoids merged CTAs/images).
+   */
+  function findFirstMultiTileHeroRoot() {
+    try {
+      const sections = document.querySelectorAll(
+        "section.section-hero, section[class*='section-hero'], [class*='section-hero']",
+      );
+      for (const section of sections) {
+        const tiles = section.querySelectorAll(":scope > .tile-wrapper");
+        if (tiles.length < 2) {
+          continue;
+        }
+        const first = tiles[0];
+        const a = areaVisible(first);
+        if (a <= 0) {
+          continue;
+        }
+        return {
+          el: first,
+          strategy: "multi-tile-first",
+          score: a * 1.92,
+          found: true,
+        };
+      }
+    } catch {
+      /* ignore */
+    }
+    return null;
+  }
+
+  function extractHeadingTextFromEl(el) {
+    if (!el) {
+      return "";
+    }
+    let t = String(el.textContent || "")
+      .trim()
+      .replace(/\s+/g, " ");
+    if (t) {
+      return t;
+    }
+    try {
+      const vh = el.querySelector(
+        ".visuallyhidden, .visually-hidden, .sr-only, [class*='visuallyhidden'], [class*='visually-hidden']",
+      );
+      if (vh) {
+        t = String(vh.textContent || "")
+          .trim()
+          .replace(/\s+/g, " ");
+        if (t) {
+          return t;
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+    const aria = String(el.getAttribute("aria-label") || "").trim();
+    if (aria) {
+      return aria.replace(/\s+/g, " ");
+    }
+    try {
+      const tile = el.closest(".tile-wrapper, .tile-content");
+      const img = tile?.querySelector(".tile-image-wrapper img, .tile-image-wrapper picture img");
+      const alt = String(img?.getAttribute("alt") || "").trim();
+      if (alt) {
+        const m = alt.match(/^(.+?)(?:\s+apple\s+logo)?$/i);
+        return (m ? m[1] : alt).trim();
+      }
+    } catch {
+      /* ignore */
+    }
+    return "";
+  }
+
+  function isHeadingTitleCandidate(el) {
+    if (!el) {
+      return false;
+    }
+    const cls = String(el.className || "").toLowerCase();
+    if (/tile-headline|headline|hero-title|page-title|display-/.test(cls)) {
+      return true;
+    }
+    if (
+      el.querySelector(
+        ".visuallyhidden, .visually-hidden, .sr-only, [class*='visuallyhidden'], [class*='visually-hidden']",
+      )
+    ) {
+      return true;
+    }
+    return !isDisplayHeadingFontSize(gs(el, "fontSize"));
+  }
+
+  function isLikelyHeroVideoPosterUrl(url) {
+    return /startframe|posterframe|_poster\.|video.*frame/i.test(String(url || ""));
+  }
+
   function isLikelyLogoImage(img) {
     if (!img) {
+      return false;
+    }
+    if (img.closest?.(".tile-image-wrapper, .tile-wrapper.theme-dark")) {
       return false;
     }
     const alt = String(img.alt || "").toLowerCase();
@@ -404,7 +505,7 @@ export default function browserExtractTypographyAndHero() {
       return h2;
     }
     return container.querySelector(
-      ".description, .lead, [class*='subhead'], [class*='intro'], [class*='subtitle']",
+      ".description, .lead, .tile-subhead, [class*='subhead'], [class*='intro'], [class*='subtitle']",
     );
   }
 
@@ -464,6 +565,34 @@ export default function browserExtractTypographyAndHero() {
     }
     const seen = new Set();
     const out = [];
+    try {
+      if (container.querySelector(".tile-ctas")) {
+        container.querySelectorAll(".tile-ctas a[href]").forEach((a) => {
+          if (isInPrimaryNav(a)) {
+            return;
+          }
+          const href = (a.getAttribute("href") || "").trim();
+          if (!href || href === "#") {
+            return;
+          }
+          const txt = (a.textContent || "").replace(/\s+/g, " ").trim();
+          if (txt.length < 2) {
+            return;
+          }
+          const key = href + "\0" + txt;
+          if (seen.has(key)) {
+            return;
+          }
+          seen.add(key);
+          out.push(a);
+        });
+        if (out.length) {
+          return out;
+        }
+      }
+    } catch {
+      /* ignore */
+    }
     container
       .querySelectorAll(
         "a.cta-button[href], a.button[href], a.btn[href], a[href].button, a[href].btn, " +
@@ -805,8 +934,9 @@ export default function browserExtractTypographyAndHero() {
           return;
         }
         const r = img.getBoundingClientRect();
+        const inTileImage = !!img.closest(".tile-image-wrapper");
         add("img", src, {
-          score: sc * 1.15,
+          score: sc * (inTileImage ? 1.65 : 1.15),
           displayWidth: Math.round(r.width),
           displayHeight: Math.round(r.height),
           naturalWidth: img.naturalWidth || 0,
@@ -826,7 +956,11 @@ export default function browserExtractTypographyAndHero() {
         const ss = src.getAttribute("srcset") || "";
         const first = ss.split(",")[0].trim().split(/\s+/)[0];
         if (first) {
-          add("picture-srcset", first, { score: 500 });
+          const inTileImage = !!src.closest(".tile-image-wrapper");
+          const posterPenalty = isLikelyHeroVideoPosterUrl(first) ? 0.35 : 1;
+          add("picture-srcset", first, {
+            score: 500 * (inTileImage ? 1.5 : 1) * posterPenalty,
+          });
         }
       });
     } catch {
@@ -905,8 +1039,17 @@ export default function browserExtractTypographyAndHero() {
     const media = Array.from(byUrl.values()).sort((a, b) => (b.score || 0) - (a.score || 0));
 
     const bestCss = media.find((m) => m.kind === "css-background" && !/logo/i.test(m.url || ""));
-    const bestImg = media.find((m) => m.kind === "img" && !/logo/i.test(m.url || ""));
-    let recommended = bestCss || bestImg || media.find((m) => !/logo/i.test(m.url || "")) || null;
+    const bestImg = media.find(
+      (m) =>
+        m.kind === "img" &&
+        !/logo/i.test(m.url || "") &&
+        !isLikelyHeroVideoPosterUrl(m.url || ""),
+    );
+    let recommended =
+      bestCss ||
+      bestImg ||
+      media.find((m) => !/logo/i.test(m.url || "") && !isLikelyHeroVideoPosterUrl(m.url || "")) ||
+      null;
     if (bestImg && bestCss && (bestCss.score || 0) > (bestImg.score || 0) * 1.2) {
       recommended = bestCss;
     }
@@ -938,6 +1081,11 @@ export default function browserExtractTypographyAndHero() {
     const hubspotSr = findHubSpotSrHeroRoot();
     if (hubspotSr) {
       return hubspotSr;
+    }
+
+    const multiTile = findFirstMultiTileHeroRoot();
+    if (multiTile) {
+      return multiTile;
     }
 
     const scored = [];
@@ -1092,6 +1240,33 @@ export default function browserExtractTypographyAndHero() {
     }
 
     return { el: null, strategy: "none", score: 0, found: false };
+  }
+
+  function narrowHeroRootIfMultiTile(picked) {
+    if (!picked?.el || !picked.el.querySelectorAll) {
+      return picked;
+    }
+    try {
+      if (picked.el.matches?.(".tile-wrapper")) {
+        return picked;
+      }
+      const tiles = picked.el.querySelectorAll(":scope > .tile-wrapper");
+      if (tiles.length < 2) {
+        return picked;
+      }
+      const first = tiles[0];
+      if (!first || areaVisible(first) <= 0) {
+        return picked;
+      }
+      return {
+        ...picked,
+        el: first,
+        strategy: `${picked.strategy || "keyword"}-first-tile`,
+        score: areaVisible(first),
+      };
+    } catch {
+      return picked;
+    }
   }
 
   function collectGoogleFontUrls(typography) {
@@ -1445,7 +1620,7 @@ export default function browserExtractTypographyAndHero() {
   }
 
   const typographyPage = extractGlobalTypography();
-  const picked = pickHeroRoot();
+  const picked = narrowHeroRootIfMultiTile(pickHeroRoot());
 
   const hero = {
     found: Boolean(picked.found && picked.el),
@@ -1518,14 +1693,18 @@ export default function browserExtractTypographyAndHero() {
     textScope.querySelector("h3") ||
     heroEl.querySelector("h3");
   if (titleEl) {
-    const titleFs = gs(titleEl, "fontSize");
-    if (isDisplayHeadingFontSize(titleFs) && !h1) {
+    if (!isHeadingTitleCandidate(titleEl)) {
       titleEl = null;
     }
   }
   if (titleEl) {
-    hero.text.title = (titleEl.textContent || "").trim().replace(/\s+/g, " ");
+    hero.text.title = extractHeadingTextFromEl(titleEl);
     hero.text.titleTag = String(titleEl.tagName || "").toLowerCase() || "h1";
+  }
+  if (!hero.text.title && h2Only && h2Only !== titleEl && isHeadingTitleCandidate(h2Only)) {
+    hero.text.title = extractHeadingTextFromEl(h2Only);
+    hero.text.titleTag = String(h2Only.tagName || "").toLowerCase() || "h2";
+    titleEl = h2Only;
   }
   if (!hero.text.title && picked.strategy === "fusion-banner") {
     const pageTitle = String(document.title || "").split("|")[0].trim();
