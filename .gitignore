@@ -11,3 +11,7 @@ cache/lightrag/.lightrag_data/*
 !cache/lightrag/.lightrag_data/.gitkeep
 !cache/lightrag/.lightrag_data/README.md
 cache/lightrag/.naive_data/
+branch_structure.json
+temp_auto_push.bat
+temp_interactive_push.bat
+.gitignore
